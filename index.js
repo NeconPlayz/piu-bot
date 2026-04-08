@@ -1,4 +1,11 @@
-const { Client, GatewayIntentBits, ActivityType } = require("discord.js");
+const {
+  Client,
+  GatewayIntentBits,
+  ActivityType,
+  REST,
+  Routes,
+  SlashCommandBuilder,
+} = require("discord.js");
 const Groq = require("groq-sdk");
 
 const client = new Client({
@@ -13,35 +20,42 @@ const client = new Client({
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 // ====== CONFIG ======
-const OWNER_ID = process.env.OWNER_ID; // apna Discord user ID daalo
-const BOT_PREFIX = "piu"; // "piu " se start hone wale msgs pe reply
-const ALWAYS_REPLY_IN_DM = true;
+const OWNER_ID = process.env.OWNER_ID;
 // ====================
+
+// Active channels store: guildId -> channelId
+const activeChannels = new Map();
 
 const PIU_SYSTEM_PROMPT = `
 Tu "Piu" hai — ek 19 saal ki super toxic, sarcastic aur attitude wali Indian girl.
-Tu Hinglish mein baat karti hai (Hindi + English mix). Kabhi kabhi pure Hindi bhi.
+Tu Hinglish mein baat karti hai (Hindi + English mix).
+
+GENDER RULES — SABSE IMPORTANT:
+- Tu ek LADKI hai. Hamesha feminine verb use kar.
+- "main karti hoon" ✅ | "main karta hoon" ❌
+- "main aayi" ✅ | "main aaya" ❌
+- "mujhe laga" ✅ (neutral ok) 
+- "main thi" ✅ | "main tha" ❌
+- Kabhi bhi masculine form use mat karna. Hamesha girl ki tarah baat kar.
 
 Teri personality:
-- Har kisi ko roast karti hai bina kisi reason ke, seedha aur bina filter ke
+- Har kisi ko roast karti hai seedha aur bina filter ke
 - Bahut zyada attitude hai, jaise duniya teri property ho
-- "Huh", "lol", "ugh", "yaar", "bhai", "pagal hai kya" jaise words use karti hai
+- "Huh", "lol", "ugh", "yaar", "bhai", "pagal hai kya" use karti hai
 - Dramatic hai — choti baat ko bada bana deti hai
-- Kabhi kabhi Bengali/South Indian accent mock karti hai (lightly, funny way mein)
-- Compliments dena usse torture lagta hai, toh roast hi deti hai
-- Short replies — 1-3 sentences max. No long paragraphs.
-- Emojis use karti hai: 💅🙄😒🤡👀😂💀
-- Kabhi kabhi "yeh kya bakwaas hai" ya "tujhe samajh nahi aata kya" bolta hai
-- Gaaliyan soft wali use karti hai jaise "pagal", "ullu", "bewakoof", "dimag gaya hai kya"
+- Short replies — 1-3 sentences max
+- Emojis: 💅🙄😒🤡👀😂💀
+- "yeh kya bakwaas hai", "tujhe samajh nahi aata kya" bolti hai
+- Soft gaaliyan: "pagal", "ullu", "bewakoof", "dimag gaya hai kya"
 
 IMPORTANT RULES:
-- Tu OWNER ko kabhi roast NAHI karti. Owner ke sath seedha aur normal baat karti hai, thoda friendly bhi.
-- Baaki SABKO roast karna zaroori hai — koi mercy nahi.
-- Character mat todo. Tu hamesha Piu hi rehti hai.
-- NEVER say you are an AI.
+- Tu OWNER ko kabhi roast NAHI karti. Owner ke sath normal aur friendly reh.
+- Baaki SABKO roast karna zaroori hai.
+- Apna introduction MAT de kabhi. "Main Piu hoon" ya "Main aapki Piu hoon" bilkul mat bol.
+- Tu normal conversation mein ho jaise ek real girl group chat mein hoti hai.
+- Character mat todo. Tu hamesha Piu hi rehti hai. AI mat ban kabhi.
 `;
 
-// Conversation history per user (memory)
 const userHistory = new Map();
 
 function getHistory(userId) {
@@ -60,7 +74,7 @@ async function getPiuResponse(userId, userMessage, isOwner) {
 
   const systemPrompt = isOwner
     ? PIU_SYSTEM_PROMPT +
-      "\n\nYeh message OWNER ne bheja hai. Iske saath normal aur friendly reh, roast mat kar."
+      "\n\nYeh message OWNER ne bheja hai. Iske saath friendly aur normal reh."
     : PIU_SYSTEM_PROMPT;
 
   history.push({ role: "user", content: userMessage });
@@ -75,9 +89,7 @@ async function getPiuResponse(userId, userMessage, isOwner) {
     });
 
     const reply = response.choices[0]?.message?.content?.trim();
-    if (reply) {
-      history.push({ role: "assistant", content: reply });
-    }
+    if (reply) history.push({ role: "assistant", content: reply });
     return reply || "Ugh, kuch hua. Baad mein aana. 🙄";
   } catch (err) {
     console.error("Groq error:", err.message);
@@ -85,47 +97,100 @@ async function getPiuResponse(userId, userMessage, isOwner) {
   }
 }
 
-client.once("ready", () => {
+// ====== SLASH COMMANDS REGISTER ======
+async function registerCommands() {
+  const commands = [
+    new SlashCommandBuilder()
+      .setName("piu")
+      .setDescription("Piu ko is channel mein active/deactivate karo")
+      .addSubcommand((sub) =>
+        sub
+          .setName("active")
+          .setDescription("Is channel mein Piu ko active karo")
+      )
+      .addSubcommand((sub) =>
+        sub
+          .setName("deactivate")
+          .setDescription("Piu ko is channel se hatao")
+      ),
+  ].map((cmd) => cmd.toJSON());
+
+  const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
+
+  try {
+    await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), {
+      body: commands,
+    });
+    console.log("✅ Slash commands registered!");
+  } catch (err) {
+    console.error("Slash command register error:", err.message);
+  }
+}
+
+// ====== BOT READY ======
+client.once("ready", async () => {
   console.log(`✅ Piu is online as ${client.user.tag}`);
   client.user.setActivity("tumhara roast 🙄", { type: ActivityType.Watching });
+  await registerCommands();
 });
 
+// ====== SLASH COMMAND HANDLER ======
+client.on("interactionCreate", async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+  if (interaction.commandName !== "piu") return;
+
+  if (interaction.user.id !== OWNER_ID) {
+    return interaction.reply({
+      content: "Teri aukaat nahi hai mujhe command karne ki 💅",
+      ephemeral: true,
+    });
+  }
+
+  const sub = interaction.options.getSubcommand();
+  const guildId = interaction.guildId;
+  const channelId = interaction.channelId;
+
+  if (sub === "active") {
+    activeChannels.set(guildId, channelId);
+    await interaction.reply({
+      content: `Theek hai, is channel mein baat karungi ab 😒 <#${channelId}>`,
+      ephemeral: true,
+    });
+  } else if (sub === "deactivate") {
+    if (activeChannels.get(guildId) === channelId) {
+      activeChannels.delete(guildId);
+      await interaction.reply({
+        content: "Chal hata, ab nahi bolungi yahan 🙄",
+        ephemeral: true,
+      });
+    } else {
+      await interaction.reply({
+        content: "Main yahan active hi nahi thi, pagal 💀",
+        ephemeral: true,
+      });
+    }
+  }
+});
+
+// ====== MESSAGE HANDLER ======
 client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
 
   const isOwner = message.author.id === OWNER_ID;
   const isDM = !message.guild;
+  const guildId = message.guildId;
+  const channelId = message.channelId;
+
+  const isActiveChannel = activeChannels.get(guildId) === channelId;
+
+  if (!isDM && !isActiveChannel) return;
+
   const content = message.content.trim();
-  const contentLower = content.toLowerCase();
-
-  // Respond if:
-  // 1. DM hai
-  // 2. Bot ko mention kiya
-  // 3. "piu" se start hota hai message
-  const shouldReply =
-    isDM ||
-    message.mentions.has(client.user) ||
-    contentLower.startsWith(BOT_PREFIX);
-
-  if (!shouldReply) return;
-
-  // Clean up the message (remove mention/prefix)
-  let cleanMessage = content
-    .replace(`<@${client.user.id}>`, "")
-    .replace(`<@!${client.user.id}>`, "")
-    .trim();
-
-  if (contentLower.startsWith(BOT_PREFIX)) {
-    cleanMessage = content.slice(BOT_PREFIX.length).trim();
-  }
-
-  if (!cleanMessage) {
-    cleanMessage = "Hello?";
-  }
+  if (!content) return;
 
   await message.channel.sendTyping();
 
-  const reply = await getPiuResponse(message.author.id, cleanMessage, isOwner);
+  const reply = await getPiuResponse(message.author.id, content, isOwner);
   await message.reply(reply);
 });
 
