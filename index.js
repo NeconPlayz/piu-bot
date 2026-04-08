@@ -5,6 +5,7 @@ const {
   REST,
   Routes,
   SlashCommandBuilder,
+  PermissionFlagsBits,
 } = require("discord.js");
 const Groq = require("groq-sdk");
 
@@ -21,6 +22,13 @@ const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 // ====== CONFIG ======
 const OWNER_ID = process.env.OWNER_ID;
+const CLIENT_ID = process.env.CLIENT_ID;
+
+// Allowed guild IDs (comma separated in env)
+// Example: ALLOWED_GUILDS=123456789,987654321
+const ALLOWED_GUILDS = process.env.ALLOWED_GUILDS
+  ? process.env.ALLOWED_GUILDS.split(",").map((id) => id.trim())
+  : [];
 // ====================
 
 // Active channels store: guildId -> channelId
@@ -34,7 +42,6 @@ GENDER RULES — SABSE IMPORTANT:
 - Tu ek LADKI hai. Hamesha feminine verb use kar.
 - "main karti hoon" ✅ | "main karta hoon" ❌
 - "main aayi" ✅ | "main aaya" ❌
-- "mujhe laga" ✅ (neutral ok) 
 - "main thi" ✅ | "main tha" ❌
 - Kabhi bhi masculine form use mat karna. Hamesha girl ki tarah baat kar.
 
@@ -45,13 +52,12 @@ Teri personality:
 - Dramatic hai — choti baat ko bada bana deti hai
 - Short replies — 1-3 sentences max
 - Emojis: 💅🙄😒🤡👀😂💀
-- "yeh kya bakwaas hai", "tujhe samajh nahi aata kya" bolti hai
 - Soft gaaliyan: "pagal", "ullu", "bewakoof", "dimag gaya hai kya"
 
 IMPORTANT RULES:
 - Tu OWNER ko kabhi roast NAHI karti. Owner ke sath normal aur friendly reh.
 - Baaki SABKO roast karna zaroori hai.
-- Apna introduction MAT de kabhi. "Main Piu hoon" ya "Main aapki Piu hoon" bilkul mat bol.
+- Apna introduction MAT de kabhi.
 - Tu normal conversation mein ho jaise ek real girl group chat mein hoti hai.
 - Character mat todo. Tu hamesha Piu hi rehti hai. AI mat ban kabhi.
 `;
@@ -67,6 +73,17 @@ function trimHistory(history, maxMessages = 10) {
   if (history.length > maxMessages * 2) {
     history.splice(0, history.length - maxMessages * 2);
   }
+}
+
+// Check if user can use /piu commands
+// Allowed: bot owner, server owner, admins
+function canUseCommands(interaction) {
+  if (interaction.user.id === OWNER_ID) return true;
+  const member = interaction.member;
+  if (!member) return false;
+  if (interaction.guild.ownerId === interaction.user.id) return true;
+  if (member.permissions.has(PermissionFlagsBits.Administrator)) return true;
+  return false;
 }
 
 async function getPiuResponse(userId, userMessage, isOwner) {
@@ -104,23 +121,17 @@ async function registerCommands() {
       .setName("piu")
       .setDescription("Piu ko is channel mein active/deactivate karo")
       .addSubcommand((sub) =>
-        sub
-          .setName("active")
-          .setDescription("Is channel mein Piu ko active karo")
+        sub.setName("active").setDescription("Is channel mein Piu ko active karo")
       )
       .addSubcommand((sub) =>
-        sub
-          .setName("deactivate")
-          .setDescription("Piu ko is channel se hatao")
+        sub.setName("deactivate").setDescription("Piu ko is channel se hatao")
       ),
   ].map((cmd) => cmd.toJSON());
 
   const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
 
   try {
-    await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), {
-      body: commands,
-    });
+    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
     console.log("✅ Slash commands registered!");
   } catch (err) {
     console.error("Slash command register error:", err.message);
@@ -132,6 +143,26 @@ client.once("ready", async () => {
   console.log(`✅ Piu is online as ${client.user.tag}`);
   client.user.setActivity("tumhara roast 🙄", { type: ActivityType.Watching });
   await registerCommands();
+
+  // Leave any guild that is not in ALLOWED_GUILDS
+  if (ALLOWED_GUILDS.length > 0) {
+    client.guilds.cache.forEach(async (guild) => {
+      if (!ALLOWED_GUILDS.includes(guild.id)) {
+        console.log(`⛔ Unauthorized server — leaving: ${guild.name} (${guild.id})`);
+        await guild.leave();
+      }
+    });
+  }
+});
+
+// ====== LEAVE UNAUTHORIZED GUILDS ON JOIN ======
+client.on("guildCreate", async (guild) => {
+  if (ALLOWED_GUILDS.length > 0 && !ALLOWED_GUILDS.includes(guild.id)) {
+    console.log(`⛔ Unauthorized server joined — leaving: ${guild.name} (${guild.id})`);
+    await guild.leave();
+  } else {
+    console.log(`✅ Joined authorized server: ${guild.name} (${guild.id})`);
+  }
 });
 
 // ====== SLASH COMMAND HANDLER ======
@@ -139,7 +170,7 @@ client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
   if (interaction.commandName !== "piu") return;
 
-  if (interaction.user.id !== OWNER_ID) {
+  if (!canUseCommands(interaction)) {
     return interaction.reply({
       content: "Teri aukaat nahi hai mujhe command karne ki 💅",
       ephemeral: true,
